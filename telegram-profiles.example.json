@@ -1,0 +1,13 @@
+{
+  "accounts": {
+    "primary": {
+      "chats": {
+        "example-group": {
+          "chat_id": -1001234567890,
+          "title": "Example group",
+          "access": "read"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,11 @@
+# Only source, tests and dependency declarations belong in version control.
+/*
+!/.gitignore
+!/requirements.txt
+!/server.py
+!/tdlib_session.py
+!/profiles.py
+!/send_journal.py
+!/test_telegram_mcp.py
+!/README.md
+!/telegram-profiles.example.json
