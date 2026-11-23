@@ -1,11 +1,19 @@
-# Only source, tests and dependency declarations belong in version control.
+# Allowlist source so an accidentally created local profile is ignored.
 /*
 !/.gitignore
+!/.github/
+/.github/*
+!/.github/workflows/
+/.github/workflows/*
+!/.github/workflows/test.yml
+!/pyproject.toml
+!/uv.lock
 !/requirements.txt
 !/server.py
-!/tdlib_session.py
-!/profiles.py
-!/send_journal.py
-!/test_telegram_mcp.py
+!/telegram_mcp/
+/telegram_mcp/*
+!/telegram_mcp/*.py
 !/README.md
 !/telegram-profiles.example.json
+!/test_telegram_mcp.py
+!/test_cli.py

@@ -8,10 +8,9 @@ from unittest.mock import ANY, Mock, call, patch
 
 from mcp.server.fastmcp.exceptions import ToolError
 
-import server
-import tdlib_session
-from profiles import ChatProfile
-from tdlib_session import RequestError, SendFailed, SessionError, TDLib, account_directory
+from telegram_mcp import cli, server, tdlib_session
+from telegram_mcp.profiles import ChatProfile
+from telegram_mcp.tdlib_session import RequestError, SendFailed, SessionError, TDLib, account_directory
 
 
 TARGET = ChatProfile(-1000000009876, "Test Chat", "read_write")
@@ -126,7 +125,7 @@ class SendTest(unittest.TestCase):
         self.client.confirm_send.side_effect = SessionError("Ожидание подтверждения истекло.")
         with self.assertRaises(SessionError):
             self.send(request_id="attempt-1")
-        with self.assertRaisesRegex(SessionError, "Предыдущая отправка не подтверждена"):
+        with self.assertRaisesRegex(SessionError, "previous send was not confirmed"):
             self.send(request_id="attempt-1")
         self.assertEqual(self.sent_count, 1)
 
@@ -140,13 +139,13 @@ class SendTest(unittest.TestCase):
 
     def test_explicit_request_id_is_bound_to_content(self):
         self.send(request_id="attempt-1")
-        with self.assertRaisesRegex(SessionError, "для другого сообщения"):
+        with self.assertRaisesRegex(SessionError, "a different message"):
             self.send("Другой текст", request_id="attempt-1")
         self.assertEqual(self.sent_count, 1)
 
     def test_rejects_alternate_sender_before_queueing(self):
         self.checked_chat["message_sender_id"] = {"chat_id": -1000000009877}
-        with self.assertRaisesRegex(SessionError, "другого имени"):
+        with self.assertRaisesRegex(SessionError, "a different identity"):
             self.send()
         self.assertEqual(self.sent_count, 0)
 
@@ -162,7 +161,7 @@ class SendTest(unittest.TestCase):
 
     def test_rejects_html_without_visible_text_before_reserving_send(self):
         self.client.call.side_effect = [{"@type": "formattedText", "text": "", "entities": []}]
-        with self.assertRaisesRegex(SessionError, "текст сообщения пуст"):
+        with self.assertRaisesRegex(SessionError, "an empty message"):
             server.send_telegram_message("primary", "sandbox", "<b></b>", parse_mode="html")
         self.assertEqual(self.sent_count, 0)
         self.client.call.assert_called_once_with(
@@ -173,7 +172,7 @@ class SendTest(unittest.TestCase):
         self.client.confirm_send.return_value.pop("id")
         with self.assertRaises(SessionError):
             self.send()
-        with self.assertRaisesRegex(SessionError, "Повтор с этим ключом заблокирован"):
+        with self.assertRaisesRegex(SessionError, "Retry with this request_id is blocked"):
             self.send()
         self.assertEqual(self.sent_count, 1)
 
@@ -199,16 +198,16 @@ class ProfilesTest(unittest.TestCase):
 
     def test_does_not_allow_cross_account_lookup_or_send_to_read_only_chat(self):
         with patch.object(server, "LocalSession") as session:
-            with self.assertRaisesRegex(SessionError, "Операция не разрешена"):
+            with self.assertRaisesRegex(SessionError, "operation is not allowed"):
                 server.read_telegram_history("primary", "personal")
-            with self.assertRaisesRegex(SessionError, "Операция не разрешена"):
+            with self.assertRaisesRegex(SessionError, "operation is not allowed"):
                 server.send_telegram_message("secondary", "personal", "Test")
         session.assert_not_called()
 
     def test_rejects_link_to_comments_before_opening_telegram_session(self):
         with patch.object(server, "get_chat", return_value=(None, TARGET)):
             with patch.object(server, "LocalSession") as session:
-                with self.assertRaisesRegex(SessionError, "неподдерживаемые параметры"):
+                with self.assertRaisesRegex(SessionError, "unsupported parameters"):
                     server.read_telegram_message("primary", "sandbox", url="https://t.me/c/9876/123?comment=456")
         session.assert_not_called()
 
@@ -221,7 +220,7 @@ class ProfilesTest(unittest.TestCase):
             client = session.return_value.__enter__.return_value
             client.call.side_effect = [{"id": 101}, {"messages": [message(50), message(49), message(48)]}]
             page = server.read_telegram_history("secondary", "personal", limit=2, before_message_id=50)
-        session.assert_called_once_with(account="secondary", expected_user_id=34, root=self.root)
+        session.assert_called_once_with(account="secondary", expected_user_id=34, root=self.root, legacy_credentials=False)
         client.call.assert_has_calls([
             call("getChat", chat_id=101),
             call("getChatHistory", chat_id=101, from_message_id=50, offset=0, limit=3, only_local=False),
@@ -234,7 +233,7 @@ class ProfilesTest(unittest.TestCase):
         with patch.object(server, "LocalSession") as session:
             client = session.return_value.__enter__.return_value
             client.call.return_value = {"chat_id": TARGET.chat_id, "message": {}}
-            with self.assertRaisesRegex(SessionError, "Сообщение недоступно"):
+            with self.assertRaisesRegex(SessionError, "message is unavailable"):
                 server.read_telegram_message("secondary", "channel", url=link)
             client.call.assert_called_once_with("getMessageLinkInfo", url=link)
         self.assertEqual(account_directory("primary", self.root), self.root)
@@ -261,7 +260,7 @@ class ProfilesTest(unittest.TestCase):
                 {"chat_id": TARGET.chat_id, "message": {"chat_id": 101}},
             ]
             link = "https://t.me/c/9876/123"
-            with self.assertRaisesRegex(SessionError, "сообщение из другого чата"):
+            with self.assertRaisesRegex(SessionError, "message from a different chat"):
                 server.read_telegram_message("primary", "review", url=link)
             self.assertEqual(client.call.call_args_list, [
                 call("getMessageLinkInfo", url=link),
@@ -280,7 +279,7 @@ class TDLibTest(unittest.TestCase):
         client = TDLib.__new__(TDLib)
         client.authorization = {"@type": "authorizationStateReady"}
         client.call = Mock(return_value={"sessions": [{"is_current": False}]})
-        with self.assertRaisesRegex(SessionError, "не подтвердил, что эта сессия активна"):
+        with self.assertRaisesRegex(SessionError, "did not confirm an active session"):
             client.confirm_active_session()
         client.call.assert_called_once_with("getActiveSessions")
 
@@ -318,7 +317,7 @@ class TDLibTest(unittest.TestCase):
             self.assertEqual(len(locks), 1)
             self.addCleanup(locks[0].close)
             self.assertFalse(locks[0].closed)
-            with self.assertRaisesRegex(SessionError, "Перезапустите MCP"):
+            with self.assertRaisesRegex(SessionError, "Restart the MCP server"):
                 with tdlib_session.LocalSession(root=directory):
                     self.fail("Session reopened while TDLib might still be using the database")
 
@@ -367,8 +366,8 @@ class SessionLoginTest(unittest.TestCase):
         with patch.object(tdlib_session, "TDLib") as create:
             client = create.return_value
             client.is_closing = False
-            client.confirm_active_session.side_effect = SessionError("TDLib не ответила вовремя.")
-            with self.assertRaisesRegex(SessionError, "не ответила вовремя"):
+            client.confirm_active_session.side_effect = SessionError("TDLib did not respond in time.")
+            with self.assertRaisesRegex(SessionError, "did not respond in time"):
                 with tdlib_session.LocalSession(login_method="qr", root=self.root):
                     self.fail("Login succeeded without network confirmation")
             create.assert_called_once()
@@ -419,7 +418,7 @@ class TerminalQrTest(unittest.TestCase):
         self.size.return_value = tdlib_session.os.terminal_size((40, 20))
         self.encoder.return_value = Mock(stdout="QR\n")
         with tdlib_session.TerminalQr() as qr:
-            with self.assertRaisesRegex(SessionError, "Увеличьте Терминал"):
+            with self.assertRaisesRegex(SessionError, "Resize the terminal"):
                 qr.show("tg://login?token=fixture")
         self.draw.assert_not_called()
 
@@ -455,17 +454,17 @@ class LoginCliTest(unittest.TestCase):
     def test_ctrl_c_exits_with_a_short_cancellation_message(self):
         stderr = StringIO()
         with (
-            patch.object(server.sys, "argv", ["server.py", "login", "--account", "primary"]),
-            patch.object(server.sys, "stdin", Mock(isatty=Mock(return_value=True))),
-            patch.object(server.os, "umask"),
-            patch.object(server, "get_account"),
+            patch.object(cli.sys, "argv", ["server.py", "login", "--account", "primary"]),
+            patch.object(cli.sys, "stdin", Mock(isatty=Mock(return_value=True))),
+            patch.object(cli.os, "umask"),
+            patch.object(cli, "get_account"),
             patch.object(server, "open_session", side_effect=KeyboardInterrupt),
             redirect_stderr(stderr),
             self.assertRaises(SystemExit) as stopped,
         ):
-            server.run_cli()
+            cli.main()
         self.assertEqual(stopped.exception.code, 130)
-        self.assertEqual(stderr.getvalue().strip(), "Вход отменён.")
+        self.assertEqual(stderr.getvalue().strip(), "Cancelled.")
 
 
 if __name__ == "__main__":

@@ -1,3 +1,1 @@
-mcp==1.30.0
-keyring==25.7.0
-pydantic>=2.11,<3
+-e .

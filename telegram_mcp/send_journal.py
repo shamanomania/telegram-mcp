@@ -4,7 +4,7 @@ import hashlib
 import json
 import sqlite3
 
-from tdlib_session import SessionError
+from .tdlib_session import SessionError
 
 
 def operation_keys(account_id, chat_id, text, request_id, entities=None):
@@ -47,11 +47,11 @@ class SendJournal:
             return None
         previous_payload, message_id = previous
         if previous_payload != payload:
-            raise SessionError("Этот request_id уже использован для другого сообщения.")
+            raise SessionError("This request_id already refers to a different message.")
         if message_id is None:
             raise SessionError(
-                "Предыдущая отправка не подтверждена. Проверьте сообщение в чате. "
-                "Повтор с этим ключом заблокирован."
+                "The previous send was not confirmed. Check the chat for the message. "
+                "Retry with this request_id is blocked."
             )
         return message_id
 
