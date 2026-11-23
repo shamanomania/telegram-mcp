@@ -6,6 +6,7 @@ import ctypes.util
 import errno
 import fcntl
 import getpass
+import hashlib
 import json
 import logging
 import os
@@ -19,9 +20,11 @@ import threading
 import time
 
 import keyring
+from keyring.errors import KeyringError
+from platformdirs import user_data_path
 
-ROOT = Path(__file__).resolve().parent
 APP = "telegram-mcp"
+ROOT = user_data_path(APP, appauthor=False)
 SERVICE = "Telegram MCP"
 TD_TIMEOUT = 30
 TD_CLOSE_TIMEOUT = 5
@@ -39,7 +42,7 @@ class RequestError(SessionError):
         self.method = method
         self.code = response.get("code")
         self.detail = response.get("message", "")
-        super().__init__(f"Telegram отклонил {method} (код {self.code}).")
+        super().__init__(f"Telegram rejected {method} (code {self.code}).")
 
 
 class SendFailed(SessionError):
@@ -60,10 +63,10 @@ class TerminalQr:
         if link == self.last_link:
             return
         if not sys.stdout.isatty():
-            raise SessionError("Для QR-входа запустите login в окне Терминала.")
+            raise SessionError("Run login in a terminal to display the QR code.")
         executable = shutil.which("qrencode") or shutil.which("qrencode", path="/opt/homebrew/bin:/usr/local/bin")
         if executable is None:
-            raise SessionError("Для QR-входа установите qrencode или запустите login --phone.")
+            raise SessionError("Install qrencode for QR sign-in or run login --phone.")
         try:
             qr = subprocess.run(
                 [executable, "-t", "ANSI256UTF8", "-l", "M", "-m", "4", "-o", "-"],
@@ -73,16 +76,16 @@ class TerminalQr:
                 check=True,
             ).stdout
         except (OSError, subprocess.CalledProcessError):
-            raise SessionError("Не удалось создать QR-код. Проверьте qrencode или запустите login --phone.") from None
+            raise SessionError("Could not render the QR code. Check qrencode or run login --phone.") from None
 
-        frame = "Вход в Telegram. QR-код обновляется автоматически.\n"
-        frame += "Telegram на iPhone → Настройки → Устройства → Подключить устройство.\n"
+        frame = "Sign in to Telegram. The QR code refreshes automatically.\n"
+        frame += "Telegram on your phone → Settings → Devices → Link Desktop Device.\n"
         frame += qr.rstrip("\n")
         rows = re.sub(r"\x1b\[[0-9;]*m", "", frame).splitlines()
         width, height = max(map(len, rows)), len(rows)
         terminal = os.get_terminal_size(sys.stdout.fileno())
         if terminal.columns < width or terminal.lines < height:
-            raise SessionError(f"Увеличьте Терминал до {width}×{height} и запустите login снова.")
+            raise SessionError(f"Resize the terminal to {width}×{height} and run login again.")
 
         enter_alternate_screen = "\x1b[?1049h" if self.last_link is None else ""
         print(f"{enter_alternate_screen}\x1b[H\x1b[2J{frame}", end="", flush=True)
@@ -99,18 +102,21 @@ def load_library():
     candidates = (configured,) if configured else (
         *(f"{prefix}/opt/tdlib/lib/libtdjson.dylib" for prefix in ("/opt/homebrew", "/usr/local")),
         ctypes.util.find_library("tdjson"),
+        "libtdjson.so" if sys.platform.startswith("linux") else None,
     )
     for path in filter(None, candidates):
         try:
-            return ctypes.CDLL(path)
-        except OSError:
+            library = ctypes.CDLL(path)
+            library.td_create_client_id
+            return library
+        except (OSError, AttributeError):
             continue
-    raise SessionError("Библиотека TDLib недоступна. Проверьте установку или путь TDLIB_LIBRARY.")
+    raise SessionError("Could not load TDLib. Install its JSON library or set TDLIB_LIBRARY to the full library path.")
 
 
 def validate_account_alias(account):
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,39}", account):
-        raise SessionError("Некорректный псевдоним аккаунта.")
+        raise SessionError("Use an account alias such as primary or work.")
 
 
 def account_directory(account, root=ROOT):
@@ -118,37 +124,70 @@ def account_directory(account, root=ROOT):
     return root if account == "primary" else root / "accounts" / account
 
 
-def credentials(account, interactive=False):
-    key = APP if account == "primary" else f"{APP}.{account}"
-    saved = keyring.get_password(SERVICE, key)
-    if saved:
-        return json.loads(saved)
-    if not interactive:
-        raise SessionError("Авторизуйте локальную сессию командой login.")
-    if not sys.stdin.isatty():
-        raise SessionError("Для скрытого ввода api_hash запустите login в Терминале.")
+def credential_key(directory):
+    # The account directory includes the profile alias and the resolved data directory.
+    digest = hashlib.sha256(os.fsencode(directory.resolve())).hexdigest()
+    return f"{APP}:{digest}"
 
-    primary = keyring.get_password(SERVICE, APP) if account != "primary" else None
-    if primary:
-        app = json.loads(primary)
-        api_id, api_hash = app["api_id"], app["api_hash"]
-    else:
-        print("Первый вход: нужны api_id и api_hash вашего приложения из https://my.telegram.org/apps.")
-        print("После ввода этих данных TDLib предложит выбранный способ входа.")
-        value = input("Telegram api_id: ").strip()
-        api_hash = getpass.getpass("Telegram api_hash (ввод скрыт): ").strip()
-        if not re.fullmatch(r"[0-9]{1,10}", value) or not 0 < int(value) <= 2_147_483_647:
-            raise SessionError("api_id должен быть числом из API development tools.")
-        if not re.fullmatch(r"[0-9a-fA-F]{32}", api_hash):
-            raise SessionError("api_hash должен содержать 32 шестнадцатеричных символа.")
-        api_id = int(value)
+
+def save_credentials(directory, config):
+    try:
+        keyring.set_password(SERVICE, credential_key(directory), json.dumps(config))
+    except KeyringError:
+        raise SessionError("Could not write to the system keyring. Unlock it and run login again.") from None
+
+
+def parse_credentials(saved):
+    try:
+        config = json.loads(saved)
+        api_id = config["api_id"]
+        api_hash = config["api_hash"]
+        encryption_key = base64.b64decode(config["encryption_key"], validate=True)
+        if (
+            type(api_id) is int and 0 < api_id <= 2_147_483_647
+            and re.fullmatch(r"[0-9a-fA-F]{32}", api_hash) and len(encryption_key) == 32
+        ):
+            return config
+    except (KeyError, TypeError, ValueError):
+        pass
+    raise SessionError("The stored Telegram credentials are invalid. Check the system keyring.")
+
+
+def credentials(account, directory, interactive=False, *, legacy=False):
+    database_exists = (directory / "session-db").is_dir()
+    try:
+        saved = keyring.get_password(SERVICE, credential_key(directory))
+        if not saved and legacy and database_exists:
+            legacy_key = APP if account == "primary" else f"{APP}.{account}"
+            saved = keyring.get_password(SERVICE, legacy_key)
+    except KeyringError:
+        raise SessionError("Could not open the system keyring. Unlock it and try again.") from None
+    if saved:
+        return parse_credentials(saved)
+    if database_exists:
+        raise SessionError(
+            "No keyring entry for this session. Use the original data directory or run "
+            "login --import-legacy-keyring for an existing legacy installation."
+        )
+    if not interactive:
+        raise SessionError("Run telegram-mcp login in a terminal first.")
+    if not sys.stdin.isatty():
+        raise SessionError("Run login in a terminal so credential input can be hidden.")
+
+    print("Create an application at https://my.telegram.org/apps to get its api_id and api_hash.")
+    value = input("Telegram api_id: ").strip()
+    if not re.fullmatch(r"[0-9]{1,10}", value) or not 0 < int(value) <= 2_147_483_647:
+        raise SessionError("api_id must be a positive 32-bit integer.")
+    api_hash = getpass.getpass("Telegram api_hash: ").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", api_hash):
+        raise SessionError("api_hash must contain 32 hexadecimal characters.")
 
     config = {
-        "api_id": api_id,
+        "api_id": int(value),
         "api_hash": api_hash,
         "encryption_key": base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
     }
-    keyring.set_password(SERVICE, key, json.dumps(config))
+    save_credentials(directory, config)
     return config
 
 
@@ -187,13 +226,13 @@ class TDLib:
                 if event.get("message", {}).get("chat_id") == self.send_chat_id:
                     self.send_events[event["old_message_id"]] = event
             return event
-        raise SessionError("TDLib не ответила вовремя.")
+        raise SessionError("TDLib did not respond in time.")
 
     def call(self, method, *, deadline=None, **arguments):
         if deadline is None:
             deadline = time.monotonic() + TD_TIMEOUT
         elif time.monotonic() >= deadline:
-            raise SessionError("Истекло время ожидания TDLib.")
+            raise SessionError("TDLib timed out.")
         self.sequence += 1
         request_id = self.sequence
         request = {"@type": method, "@extra": request_id, **arguments}
@@ -224,11 +263,11 @@ class TDLib:
             if step == "authorizationStateReady":
                 return
             if self.is_closing:
-                raise SessionError("Telegram завершает локальную сессию.")
+                raise SessionError("Telegram is closing the local session.")
             self.authorization = None
             if step == "authorizationStateWaitTdlibParameters":
                 if self.legacy is None:
-                    raise SessionError("TDLib не сообщила версию библиотеки.")
+                    raise SessionError("Could not determine the TDLib version.")
                 parameters = {
                     "database_directory": str(database_directory),
                     "use_file_database": False,
@@ -237,7 +276,7 @@ class TDLib:
                     "use_secret_chats": False,
                     "api_id": config["api_id"],
                     "api_hash": config["api_hash"],
-                    "system_language_code": "ru",
+                    "system_language_code": "en",
                     "device_model": "Telegram MCP",
                     "application_version": "1.0",
                 }
@@ -251,50 +290,58 @@ class TDLib:
                 continue
 
             if not login_method:
-                raise SessionError("Подтвердите вход командой login в своём Терминале.")
+                raise SessionError("Run telegram-mcp login in a terminal to authorize this profile.")
             if step == "authorizationStateWaitPhoneNumber":
                 if login_method == "phone":
-                    number = getpass.getpass("Номер телефона Telegram в формате +… (ввод скрыт): ").strip()
+                    number = getpass.getpass("Telegram phone number (including + and country code): ").strip()
                     if not re.fullmatch(r"\+[1-9][0-9]{6,14}", number):
-                        raise SessionError("Введите номер с + и кодом страны, без пробелов и дефисов.")
+                        raise SessionError("Enter the number with + and a country code, without spaces or hyphens.")
                     self.call("setAuthenticationPhoneNumber", phone_number=number, settings=None)
                 else:
                     self.call("requestQrCodeAuthentication", other_user_ids=[])
             elif step == "authorizationStateWaitCode":
-                code = getpass.getpass("Код входа от Telegram (ввод скрыт): ").strip()
+                code = getpass.getpass("Telegram login code: ").strip()
                 self.call("checkAuthenticationCode", code=code)
+            elif step == "authorizationStateWaitEmailAddress":
+                qr.clear()
+                email_address = getpass.getpass("Telegram login email: ").strip()
+                self.call("setAuthenticationEmailAddress", email_address=email_address)
+            elif step == "authorizationStateWaitEmailCode":
+                qr.clear()
+                code = getpass.getpass("Telegram email login code: ").strip()
+                self.call("checkAuthenticationEmailCode", code={"@type": "emailAddressAuthenticationCode", "code": code})
             elif step == "authorizationStateWaitOtherDeviceConfirmation":
                 if login_method == "phone":
-                    raise SessionError("В этой попытке ещё активен QR-вход.")
+                    raise SessionError("This login attempt is still waiting for a QR scan.")
                 qr.show(state["link"])
             elif step == "authorizationStateWaitPassword":
                 qr.clear()
                 self.check_password()
             else:
-                raise SessionError(f"Telegram запросил другой шаг входа ({step}).")
+                raise SessionError(f"This login step is unsupported ({step}). Try QR sign-in or update TDLib.")
 
     def check_password(self):
         while True:
-            password = getpass.getpass("Пароль двухэтапной аутентификации (ввод скрыт): ")
+            password = getpass.getpass("Telegram two-step verification password: ")
             try:
                 self.call("checkAuthenticationPassword", password=password)
             except RequestError as exc:
                 if exc.code != 400 or exc.detail != "PASSWORD_HASH_INVALID":
                     raise
-                print("Telegram отклонил пароль. Попробуйте ещё раз или нажмите Ctrl+C для отмены.", flush=True)
+                print("Telegram rejected the password. Try again or press Ctrl+C to cancel.", flush=True)
             else:
                 return
 
     def confirm_send(self, pending):
         if pending.get("chat_id") != self.send_chat_id:
-            raise SessionError("Telegram вернул неожиданный чат при отправке.")
+            raise SessionError("Telegram returned an unexpected chat when sending.")
         sending_state = pending.get("sending_state")
         if not sending_state:
             return pending
         if sending_state.get("@type") == "messageSendingStateFailed":
-            raise SendFailed("Telegram сообщил, что сообщение не отправлено.")
+            raise SendFailed("Telegram reported that the message was not sent.")
         if sending_state.get("@type") != "messageSendingStatePending":
-            raise SessionError("TDLib вернула неизвестное состояние отправки.")
+            raise SessionError("TDLib returned an unknown send state.")
 
         pending_id = pending["id"]
         deadline = time.monotonic() + TD_TIMEOUT
@@ -302,17 +349,17 @@ class TDLib:
             while pending_id not in self.send_events:
                 self.receive(deadline)
         except SessionError as exc:
-            raise SessionError("Отправка ещё не подтверждена. Проверьте сообщение в чате.") from exc
+            raise SessionError("The send is unconfirmed. Check the chat for the message.") from exc
         event = self.send_events.pop(pending_id)
         if event["@type"] != "updateMessageSendSucceeded":
-            raise SendFailed("Telegram сообщил, что сообщение не отправлено.")
+            raise SendFailed("Telegram reported that the message was not sent.")
         return event["message"]
 
     def confirm_active_session(self):
         # TDLib can restore Ready from disk before Telegram rejects a revoked session.
         sessions = self.call("getActiveSessions").get("sessions", [])
         if self.is_closing or not any(session.get("is_current") is True for session in sessions):
-            raise SessionError("Telegram не подтвердил, что эта сессия активна.")
+            raise SessionError("Telegram did not confirm an active session.")
 
     @property
     def is_closing(self):
@@ -332,21 +379,26 @@ class TDLib:
 
 
 class LocalSession:
-    def __init__(self, login_method=None, send_chat_id=None, account="primary", expected_user_id=None, *, root=ROOT):
+    def __init__(
+        self, login_method=None, send_chat_id=None, account="primary", expected_user_id=None,
+        *, root=ROOT, legacy_credentials=False,
+    ):
         self.login_method = login_method
         self.send_chat_id = send_chat_id
         self.account = account
         self.directory = account_directory(account, root)
         self.expected_user_id = expected_user_id
+        self.legacy_credentials = legacy_credentials
+        self.config = None
         self.lock = None
         self.client = None
 
     def __enter__(self):
         if not _CLIENT_LOCK.acquire(blocking=False):
-            raise SessionError("TDLib выполняет другую операцию. Повторите после её завершения.")
+            raise SessionError("TDLib is busy. Retry after the current operation finishes.")
         try:
             if _UNCLOSED_LOCKS:
-                raise SessionError("TDLib не завершила предыдущую сессию. Перезапустите MCP.")
+                raise SessionError("TDLib did not close its previous session. Restart the MCP server.")
             self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             descriptor = os.open(self.directory / "session.lock", os.O_CREAT | os.O_RDWR, 0o600)
             self.lock = os.fdopen(descriptor, "a")
@@ -355,10 +407,12 @@ class LocalSession:
             except OSError as exc:
                 if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
                     raise
-                raise SessionError("Локальная сессия TDLib уже используется.") from exc
+                raise SessionError("Another process is using this Telegram session. Retry when it finishes.") from exc
 
-            config = credentials(self.account, interactive=bool(self.login_method))
-            return self.open_client(config)
+            self.config = credentials(
+                self.account, self.directory, interactive=bool(self.login_method), legacy=self.legacy_credentials,
+            )
+            return self.open_client(self.config)
         except BaseException as exc:
             self.__exit__(type(exc), exc, exc.__traceback__)
             raise
@@ -371,7 +425,7 @@ class LocalSession:
             try:
                 self.client.authorize(config, self.login_method, database)
                 if self.expected_user_id is not None and self.client.call("getMe").get("id") != self.expected_user_id:
-                    raise SessionError("Авторизованный аккаунт не совпадает с user_id профиля.")
+                    raise SessionError("The signed-in Telegram account does not match the profile.")
                 if self.login_method:
                     self.client.confirm_active_session()
             except SessionError as error:
@@ -380,8 +434,8 @@ class LocalSession:
                     raise
                 self.client.wait_closed(time.monotonic() + TD_TIMEOUT)
                 if retry:
-                    raise SessionError("Telegram завершил новую сессию. Запустите login ещё раз.") from error
-                print("Telegram завершил сохранённую сессию. Начинаю новый вход.", flush=True)
+                    raise SessionError("Telegram closed the new session. Run login again.") from error
+                print("Telegram closed the saved session. Starting sign-in again.", flush=True)
             else:
                 return self.client
 
