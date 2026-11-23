@@ -1,18 +1,29 @@
 # Telegram MCP
 
-Read and send Telegram messages from a local MCP client using your own Telegram account. You decide which chats the client can access and whether each chat is read-only, send-only or both.
+Read and send Telegram messages from Codex, Claude, Cursor, or VS Code using your own Telegram account. Start by giving your client read access to one chat. You can grant sending access later.
 
-**Requirements** · macOS or Linux, [uv](https://docs.astral.sh/uv/getting-started/installation/) (or Python 3.11+), TDLib and a local MCP client with stdio support.
+## Quickstart
 
-## 1. Install
+You'll need an active Telegram account, macOS or Linux, and a client that can launch a local MCP server over stdio.
 
-On macOS, install TDLib and the optional terminal QR encoder.
+### 1. Install
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if you don't have it yet. On macOS, install Telegram's client library (TDLib) and the terminal QR encoder.
 
 ```sh
 brew install tdlib qrencode
 ```
 
-On Linux, install a build of the TDLib JSON library (`libtdjson.so`) for your OS and architecture. Follow the [official TDLib build instructions](https://tdlib.github.io/td/build.html) if your distribution doesn't package it. For a library outside the standard loader paths, set `TDLIB_LIBRARY` to its absolute path before running setup or generating client configuration. Use an unlocked desktop Secret Service or KWallet keyring. Install your distribution's `qrencode` package for QR sign-in.
+<details>
+<summary>Linux prerequisites</summary>
+
+Install the TDLib JSON library (`libtdjson.so`) for your OS and architecture. Use the [official TDLib build instructions](https://tdlib.github.io/td/build.html) if your distribution doesn't package it. For a library outside the standard loader paths, set `TDLIB_LIBRARY` to its absolute path.
+
+Use an unlocked desktop keyring such as Secret Service or KWallet. Install `qrencode` if you want to sign in by QR.
+
+</details>
+
+Install Telegram MCP.
 
 ```sh
 uv tool install --from git+https://github.com/shamanomania/telegram-mcp.git telegram-mcp
@@ -21,18 +32,14 @@ uv tool install --from git+https://github.com/shamanomania/telegram-mcp.git tele
 <details>
 <summary>Install a pull request before merging</summary>
 
-Use the command below in place of the `uv tool install` command above. Set `pr_number` to the number in the pull request URL. `--force` installs the selected build even if Telegram MCP is already installed.
+For a PR preview, run the following instead of the install command above. Set `pr_number` to the number in the GitHub PR URL. `--force` installs that build even if Telegram MCP is already installed.
 
 ```sh
 pr_number=1
 uv tool install --force --from "git+https://github.com/shamanomania/telegram-mcp.git@refs/pull/${pr_number}/head" telegram-mcp
 ```
 
-Continue with [Sign in and choose a chat](#2-sign-in-and-choose-a-chat).
-
 </details>
-
-If your shell can't find the command after installation, run `uv tool update-shell` and open a new terminal.
 
 <details>
 <summary>Install from a checkout with Python</summary>
@@ -42,75 +49,168 @@ git clone https://github.com/shamanomania/telegram-mcp.git
 cd telegram-mcp
 python3 -m venv .venv
 .venv/bin/python -m pip install .
-.venv/bin/telegram-mcp --help
 ```
 
-Use `.venv/bin/telegram-mcp` in place of `telegram-mcp` in the following commands.
+Use Python 3.11 or newer and replace `telegram-mcp` with `.venv/bin/telegram-mcp` in the commands below.
 
 </details>
 
-## 2. Sign in and choose a chat
+If your shell reports `command not found`, run `uv tool update-shell` and open a new terminal.
+
+### 2. Sign in to Telegram
 
 ```sh
 telegram-mcp setup
 telegram-mcp doctor
 telegram-mcp login
+```
+
+On the first login, the terminal asks for your Telegram application's `api_id` and `api_hash`. Enter the hash in the terminal. The input is hidden.
+
+<details>
+<summary>Where do I get my api_id and api_hash?</summary>
+
+1. Open [Telegram API development tools](https://my.telegram.org/apps) and sign in with your phone number. The confirmation code arrives in Telegram.
+2. Copy **App api_id** and **App api_hash** if the page already shows them. If Telegram shows a form, create an application and copy the two values it gives you.
+
+An existing API application works for a fresh Telegram MCP login. [Telegram's guide to API credentials](https://core.telegram.org/api/obtaining_api_id)
+
+</details>
+
+When the QR appears, open **Telegram → Settings → Devices → Link Desktop Device** on your phone and scan it. Enter your two-step verification password in the terminal if prompted. Wait for `Telegram session is active` before continuing. To sign in with a phone number and login code, run `telegram-mcp login --phone`.
+
+### 3. Choose one chat
+
+`chats` shows recent chats and their numeric IDs in your terminal, including archived chats.
+
+```sh
 telegram-mcp chats
 ```
 
-Get your application's `api_id` and `api_hash` from [Telegram API development tools](https://my.telegram.org/apps). The terminal prompts you for them during the first login. Open **Telegram → Settings → Devices → Link Desktop Device** on your phone and scan the QR code. The terminal prompts for your two-step verification password if Telegram requires it. Run `telegram-mcp login --phone` to enter a number and the login codes instead.
+A chat named **Reading List** might appear like this.
 
-Copy a chat ID from the terminal output. Replace the example ID below with that ID.
+```text
+-1001234567890    "Reading List"
+```
+
+Replace the example ID and title below with the ones from your output. Keep the minus sign if the ID has one. `my-chat` is the alias you'll use when talking to the MCP client.
 
 ```sh
-telegram-mcp allow-chat my-chat -1001234567890
+telegram-mcp allow-chat my-chat -1001234567890 --title "Reading List"
 telegram-mcp doctor --account primary
 ```
 
-- `chats "Project name"` searches by title. `chats @publicname` looks up a public chat.
-- Use `allow-chat my-chat ID --title "Project name"` for an older chat. Use `--username @publicname` for a public chat and to enable reads through its public message links.
-- Access defaults to `read`. Repeat `allow-chat` for the same alias and ID with `--access read_write` or `--access send` when you want to enable sending. Use `remove-chat my-chat` to revoke access.
-- To add another Telegram account, pass `--account work` to `setup`, `login` and subsequent commands. Each profile is bound to the Telegram user verified at login.
+Telegram MCP grants read access by default. `doctor --account primary` checks that Telegram confirms the session is active.
 
-## 3. Connect your MCP client
+### 4. Connect your MCP client
 
-Run the command for your client and add the generated entry to its existing config. Use your client's local or user configuration for personal chats.
+For Codex, generate the configuration and add the displayed entry to `~/.codex/config.toml`.
 
-| Client | Command | Where to add it |
+```sh
+telegram-mcp client-config codex
+```
+
+<details>
+<summary>Claude, Cursor, VS Code, and other local clients</summary>
+
+| Client | Generate config | Where to add it |
 | --- | --- | --- |
-| Codex | `telegram-mcp client-config codex` | `~/.codex/config.toml` |
 | Claude Desktop | `telegram-mcp client-config claude` | **Settings → Developer → Edit Config** |
-| Claude Code | `telegram-mcp client-config claude` | `mcpServers` in `.mcp.json`, or the entry as input to `claude mcp add-json` for user scope |
+| Claude Code | `telegram-mcp client-config claude` | `mcpServers` in `.mcp.json`, or pass the server object to `claude mcp add-json --scope user telegram-mcp` |
 | Cursor | `telegram-mcp client-config cursor` | `~/.cursor/mcp.json` |
-| VS Code | `telegram-mcp client-config vscode` | Open **MCP: Open User Configuration** from the Command Palette |
+| VS Code | `telegram-mcp client-config vscode` | **MCP: Open User Configuration** in the Command Palette |
 | Other local stdio clients | `telegram-mcp client-config json` | Use the generated `command`, `args` and optional `env` |
 
-Restart the client or reload its MCP servers. To try it, ask **“Read the last five messages from `my-chat` in Telegram.”** The account and chat aliases are discoverable through `list_telegram_chats`.
+Use local or user configuration for personal chats. Clients that only accept a remote MCP URL need a separate integration.
 
-The server runs as a local process with its user's OS keyring. A client that only accepts a remote MCP URL needs a separate integration.
+</details>
 
-## Tools
+Restart the client or reload its MCP servers. Try this prompt.
+
+> Read the last five messages from `my-chat` in Telegram.
+
+## More examples
+
+### Find a particular chat
+
+```sh
+telegram-mcp chats "Reading List"   # Search by title
+telegram-mcp chats @publicname     # Find a public chat by username
+```
+
+For a public chat, use its ID and add `--username @publicname` to `allow-chat`. This enables reading public `t.me` message links for that chat.
+
+### Read or summarize messages
+
+> Summarize the last 20 messages in `my-chat` and list any action items.
+
+> Read the message at `https://t.me/c/1234567890/42` in `my-chat`.
+
+Use a message link from the chat you allowed. For a public link, configure the chat's username as shown above.
+
+<details>
+<summary>Send a message or remove access</summary>
+
+Choose a chat you control, such as Saved Messages. Substitute its ID and title from `chats` in the command below. If you already allowed that chat, use its existing alias.
+
+```sh
+telegram-mcp allow-chat send-test 123456789 --title "Saved Messages" --access read_write
+```
+
+> Send "Telegram MCP is working" to `send-test` in Telegram.
+
+Use `--access send` for send-only access. Run the following command to remove access to the chat.
+
+```sh
+telegram-mcp remove-chat send-test
+```
+
+</details>
+
+<details>
+<summary>Use a second Telegram account</summary>
+
+```sh
+telegram-mcp setup --account work
+telegram-mcp login --account work
+telegram-mcp chats --account work
+telegram-mcp allow-chat work-updates -1002345678901 --account work --title "Work Updates"
+```
+
+Replace the example ID and title with a chat from that account. Ask your client to read `work-updates` on the `work` account.
+
+</details>
+
+## Reference
+
+<details>
+<summary>MCP tools and send retries</summary>
 
 | Tool | Behavior |
 | --- | --- |
-| `list_telegram_chats` | Lists only configured aliases, chat IDs and access levels. |
-| `read_telegram_message` | Reads one message by a `message_id` returned by MCP or a matching `https://t.me/` link. |
-| `read_telegram_history` | Returns messages from newest to oldest. Pass `next_before_message_id` as `before_message_id` for the next page. TDLib can return fewer messages than requested. |
-| `send_telegram_message` | Sends text as your personal Telegram user. Set `parse_mode: "html"` for Telegram HTML. |
+| `list_telegram_chats` | Lists allowed account and chat aliases, chat IDs, and permissions. |
+| `read_telegram_message` | Reads one message by a `message_id` from MCP or a matching `t.me` message link. |
+| `read_telegram_history` | Reads newest to oldest. Pass `next_before_message_id` as `before_message_id` for the next page. TDLib can return fewer messages than requested. |
+| `send_telegram_message` | Sends text as your personal Telegram account. Use `parse_mode: "html"` for Telegram HTML. |
 
-Use a unique `request_id` for each intended send. Repeating the same ID with the same payload returns the recorded receipt for a confirmed send. When Telegram hasn't confirmed the outcome, check the destination before trying a new request. Without an ID, matching payloads to the same account and chat share a receipt, so supply a new ID when you intentionally want to send the same text again.
+Use a unique `request_id` for each intended send. Retrying a confirmed send with the same ID and payload returns its recorded receipt. If the outcome is unconfirmed, check the chat before trying a new request. Without an ID, matching payloads for the same account and chat share a receipt.
 
-## Local data and troubleshooting
-
-- Sessions, the chat allowlist and send receipts stay in the per-user data directory. `telegram-mcp doctor` prints its location. The API credentials and database encryption key stay in your OS keyring.
-- Use `--data-dir "/absolute/path"` before any subcommand, or set `TELEGRAM_MCP_DATA_DIR`, to use a separate local installation. The generated client entry carries that directory.
-- `telegram-mcp doctor --account primary` confirms the session with Telegram. If a session is busy, let the other operation finish and retry. Each account database has a single writer.
-- The tools return allowed Telegram content to your MCP client. Review that client's data and tool approval settings before enabling private chats or granting send access.
+</details>
 
 <details>
-<summary>Upgrade an existing local installation</summary>
+<summary>Local data and troubleshooting</summary>
 
-Existing commands that launch `server.py` from a checkout with a local `telegram-profiles.json` keep using the existing database layout. To switch that installation to the packaged command, use the original data directory and import its original Telegram MCP keyring entry after the session is verified.
+- Run `telegram-mcp doctor` to find the local directory for profiles, sessions, and send receipts. Your API credentials and database encryption key are stored in the OS keyring.
+- Use `telegram-mcp doctor --account primary` to check the session. If Telegram has signed it out, run `telegram-mcp login` again. If the session is busy, let the current operation finish and retry.
+- Use `--data-dir "/absolute/path"` before a subcommand or set `TELEGRAM_MCP_DATA_DIR` to keep a separate profile directory. The generated client configuration includes that directory.
+- Your MCP client receives messages returned by the tools. Check its data and tool approval settings before granting access to private chats or allowing sends.
+
+</details>
+
+<details>
+<summary>Upgrade an existing checkout-based installation</summary>
+
+A client that launches `server.py` from a checkout with a local `telegram-profiles.json` can keep using that profile and database. To switch to the packaged command, point it at the same directory and import the existing keyring entry.
 
 ```sh
 export TELEGRAM_MCP_DATA_DIR="/absolute/path/to/existing/telegram-mcp"
@@ -119,13 +219,16 @@ telegram-mcp doctor --account primary
 telegram-mcp client-config codex
 ```
 
-For additional accounts, repeat login with `--account ALIAS`. Generate the format for your own MCP client.
+Repeat login with `--account ALIAS` for each additional account. Generate the configuration for your own MCP client.
 
 </details>
 
-## Development
+<details>
+<summary>Run the tests locally</summary>
 
 ```sh
 uv sync --locked
 uv run --locked python -m unittest -q
 ```
+
+</details>
