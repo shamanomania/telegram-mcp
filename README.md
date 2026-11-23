@@ -18,6 +18,20 @@ On Linux, install a build of the TDLib JSON library (`libtdjson.so`) for your OS
 uv tool install --from git+https://github.com/shamanomania/telegram-mcp.git telegram-mcp
 ```
 
+<details>
+<summary>Install a pull request before merging</summary>
+
+Use the command below in place of the `uv tool install` command above. Set `pr_number` to the number in the pull request URL. `--force` installs the selected build even if Telegram MCP is already installed.
+
+```sh
+pr_number=1
+uv tool install --force --from "git+https://github.com/shamanomania/telegram-mcp.git@refs/pull/${pr_number}/head" telegram-mcp
+```
+
+Continue with [Sign in and choose a chat](#2-sign-in-and-choose-a-chat).
+
+</details>
+
 If your shell can't find the command after installation, run `uv tool update-shell` and open a new terminal.
 
 <details>
