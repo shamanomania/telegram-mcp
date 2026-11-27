@@ -12,7 +12,7 @@ from keyring.errors import KeyringError
 
 from . import server
 from .profiles import (
-    ACCESS, ALIAS, PROFILE_FILE, USERNAME, ChatProfile, edit_profiles, get_account, load_profiles, parse_chat,
+    ACCESS, ALIAS, PROFILE_FILE, USERNAME, ChatProfile, edit_profiles, get_account, is_chat_id, load_profiles, parse_chat,
 )
 from .tdlib_session import (
     ROOT, TD_TIMEOUT, SessionError, account_directory, load_library, save_credentials, validate_account_alias,
@@ -88,7 +88,7 @@ def chats(args):
 
 
 def allow_chat(args):
-    if not ALIAS.fullmatch(args.alias) or not -(2**53) < args.chat_id < 2**53 or args.chat_id == 0:
+    if not ALIAS.fullmatch(args.alias) or not is_chat_id(args.chat_id):
         raise SessionError("Use a valid chat ID and an alias such as my-chat.")
     profile = get_account(args.account, server.ROOT)
     if profile.user_id is None:
@@ -218,6 +218,9 @@ def argument_parser():
     remove_parser = commands.add_parser("remove-chat", help="Remove a chat from the MCP allowlist.")
     add_account_option(remove_parser)
     remove_parser.add_argument("alias")
+    send_to_parser = commands.add_parser("send-to", help="Choose which recipients this account can send text to.")
+    add_account_option(send_to_parser)
+    send_to_parser.add_argument("recipients", choices=("configured", "*"), help="Quote '*' to allow any recipient.")
     config_parser = commands.add_parser("client-config", help="Print a ready-to-paste stdio client configuration.")
     config_parser.add_argument("client", choices=("codex", "claude", "cursor", "vscode", "json"))
     doctor_parser = commands.add_parser("doctor", help="Check the local setup and optionally verify a Telegram session.")
@@ -247,6 +250,12 @@ def main(argv=None, *, legacy_root=None):
                 allow_chat(args)
             case "remove-chat":
                 remove_chat(args)
+            case "send-to":
+                with edit_profiles(server.ROOT) as accounts:
+                    if args.account not in accounts:
+                        raise SessionError("Account profile missing. Run telegram-mcp setup first.")
+                    accounts[args.account]["send_to"] = args.recipients
+                print(f"Text recipients for {args.account}: {args.recipients}")
             case "client-config":
                 print_client_config(
                     args.client, legacy_script=legacy_root / "server.py" if legacy else None,

@@ -7,6 +7,10 @@ import sqlite3
 from .tdlib_session import SessionError
 
 
+def request_key(account_id, recipient, request_id):
+    return hashlib.sha256(json.dumps((account_id, recipient, request_id)).encode()).hexdigest()
+
+
 def operation_keys(account_id, chat_id, text, request_id, entities=None):
     scope = (account_id, chat_id)
     content = (*scope, text)
@@ -15,7 +19,7 @@ def operation_keys(account_id, chat_id, text, request_id, entities=None):
     payload = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
     if request_id is None:
         return f"message:{payload}", payload
-    supplied = hashlib.sha256(json.dumps((*scope, request_id)).encode()).hexdigest()
+    supplied = request_key(account_id, chat_id, request_id)
     return f"request:{supplied}", payload
 
 
@@ -37,6 +41,19 @@ class SendJournal:
 
     def close(self):
         self.connection.close()
+
+    def bind_username(self, account_id, username, request_id, chat_id):
+        key = request_key(account_id, username.casefold(), request_id)
+        with self.connection:
+            self.connection.execute(
+                "CREATE TABLE IF NOT EXISTS username_requests (request_key TEXT PRIMARY KEY, chat_id INTEGER NOT NULL)"
+            )
+            self.connection.execute("INSERT OR IGNORE INTO username_requests VALUES (?, ?)", (key, chat_id))
+            bound_id, = self.connection.execute(
+                "SELECT chat_id FROM username_requests WHERE request_key = ?", (key,)
+            ).fetchone()
+            if bound_id != chat_id:
+                raise SessionError("This @username now resolves to a different recipient for this request_id.")
 
     def receipt(self, operation, payload):
         previous = self.connection.execute(

@@ -9,7 +9,7 @@ from unittest.mock import ANY, Mock, call, patch
 from mcp.server.fastmcp.exceptions import ToolError
 
 from telegram_mcp import cli, server, tdlib_session
-from telegram_mcp.profiles import ChatProfile
+from telegram_mcp.profiles import ChatProfile, edit_profiles
 from telegram_mcp.tdlib_session import RequestError, SendFailed, SessionError, TDLib, account_directory
 
 
@@ -83,6 +83,7 @@ class SendTest(unittest.TestCase):
         self.client = session.return_value.__enter__.return_value
         self.client.legacy = True
         self.checked_chat = {"id": TARGET.chat_id, "title": TARGET.title}
+        self.public_chat = self.checked_chat
         self.sent_count = 0
         self.client.call.side_effect = self.handle_request
         self.client.confirm_send.return_value = {
@@ -90,6 +91,9 @@ class SendTest(unittest.TestCase):
         }
 
     def handle_request(self, method, **kwargs):
+        if method == "searchPublicChat":
+            self.assertEqual(kwargs["username"].casefold(), "reader")
+            return self.public_chat
         if method == "getChat":
             self.assertEqual(kwargs["chat_id"], TARGET.chat_id)
             return self.checked_chat
@@ -104,6 +108,60 @@ class SendTest(unittest.TestCase):
 
     def send(self, text=SAMPLE_MESSAGE, **options):
         return server.send_telegram_message("primary", "sandbox", text, **options)
+
+    def enable_wildcard(self):
+        with edit_profiles(server.ROOT) as accounts:
+            profile = accounts["primary"]
+            profile.update(user_id=ACCOUNT, send_to="*")
+            profile["chats"]["sandbox"]["access"] = "read"
+
+    def test_wildcard_sends_by_username_id_or_read_alias_with_one_receipt(self):
+        self.enable_wildcard()
+        for address in ("@Reader", str(TARGET.chat_id), "sandbox"):
+            with self.subTest(address=address):
+                result = server.send_telegram_message("primary", address, SAMPLE_MESSAGE, request_id="one")
+                self.assertEqual(result["duplicate"], address != "@Reader")
+                self.assertEqual(self.client.send_chat_id, TARGET.chat_id)
+        self.assertEqual(self.sent_count, 1)
+
+    def test_retry_after_username_transfer_cannot_reach_the_new_owner(self):
+        self.enable_wildcard()
+        server.send_telegram_message("primary", "@Reader", SAMPLE_MESSAGE, request_id="one")
+        self.public_chat = {"id": 1002, "title": "New owner"}
+        with self.assertRaisesRegex(SessionError, "different recipient"):
+            server.send_telegram_message("primary", "@reader", SAMPLE_MESSAGE, request_id="one")
+        self.assertEqual(self.sent_count, 1)
+
+    def test_cold_private_id_must_resolve_to_that_exact_chat(self):
+        self.enable_wildcard()
+        self.client.call.side_effect = [
+            RequestError("getChat", {"code": 400, "message": "Chat not found"}),
+            {"id": 102, "title": "Different contact"},
+        ]
+        with self.assertRaisesRegex(SessionError, "different chat"):
+            server.send_telegram_message("primary", "101", SAMPLE_MESSAGE)
+        self.client.call.assert_has_calls([
+            call("getChat", chat_id=101),
+            call("createPrivateChat", user_id=101, force=False, deadline=ANY),
+        ])
+
+    def test_wildcard_gives_no_read_access_and_accepts_only_one_exact_recipient(self):
+        self.enable_wildcard()
+        for addr in ("@reader", "123", "*"):
+            with self.subTest(addr=addr), self.assertRaisesRegex(SessionError, "not allowed"):
+                server.read_telegram_history("primary", addr)
+            with self.subTest(addr=addr), self.assertRaisesRegex(SessionError, "not allowed"):
+                server.read_telegram_message("primary", addr, message_id=1)
+        for addr in ("*", "A chat title", "@one,@two", "0", str(2**53)):
+            with self.subTest(addr=addr), self.assertRaisesRegex(SessionError, "one configured alias"):
+                server.send_telegram_message("primary", addr, SAMPLE_MESSAGE)
+        self.client.call.assert_not_called()
+
+    def test_direct_sends_require_the_wildcard(self):
+        for addr in ("@reader", str(TARGET.chat_id)):
+            with self.subTest(addr=addr), self.assertRaisesRegex(SessionError, "not allowed"):
+                server.send_telegram_message("primary", addr, SAMPLE_MESSAGE)
+        self.client.call.assert_not_called()
 
     def test_sends_without_reference_and_reuses_receipt_on_repeat(self):
         first = self.send()

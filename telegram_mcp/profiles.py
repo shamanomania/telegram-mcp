@@ -62,6 +62,7 @@ class ChatProfile:
 class AccountProfile:
     chats: dict[str, ChatProfile]
     user_id: int | None = None
+    send_to: str = "configured"
 
 
 def read_profile_document(root: Path):
@@ -120,10 +121,19 @@ def parse_account(alias, config):
     user_id = config.get("user_id")
     if user_id is not None and (type(user_id) is not int or not 0 < user_id < 2**53):
         raise SessionError(f"Invalid user_id in profile {alias}. Run login to bind a new profile.")
+    send_to = config.get("send_to", "configured")
+    if send_to not in ("configured", "*"):
+        raise SessionError(f"Use 'configured' or '*' for send_to in profile {alias}.")
+    if send_to == "*" and user_id is None:
+        raise SessionError("Run telegram-mcp login to bind the account before enabling wildcard sends.")
     chats = {name: parse_chat(name, value) for name, value in config["chats"].items()}
     if len({chat.chat_id for chat in chats.values()}) != len(chats):
         raise SessionError(f"The same chat ID is listed twice in profile {alias}.")
-    return AccountProfile(chats, user_id)
+    return AccountProfile(chats, user_id, send_to)
+
+
+def is_chat_id(value):
+    return type(value) is int and 0 < abs(value) < 2**53
 
 
 def parse_chat(alias, config):
@@ -133,7 +143,7 @@ def parse_chat(alias, config):
     title = config.get("title")
     access = config.get("access")
     username = config.get("username")
-    if type(chat_id) is not int or chat_id == 0 or not -(2**53) < chat_id < 2**53:
+    if not is_chat_id(chat_id):
         raise SessionError(f"Invalid chat_id for {alias}.")
     if not isinstance(title, str) or not title.strip() or not isinstance(access, str) or access not in ACCESS:
         raise SessionError(f"Provide a title and valid access level for {alias}.")

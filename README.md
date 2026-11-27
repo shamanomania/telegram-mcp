@@ -165,6 +165,18 @@ Use `--access send` for send-only access. Run the following command to remove ac
 telegram-mcp remove-chat send-test
 ```
 
+To send text to any recipient on your explicit request, enable the account's send-only wildcard:
+
+```bash
+telegram-mcp send-to '*'
+```
+
+Name one recipient per message: a configured alias, an exact `@username`, or a numeric Telegram chat ID
+known to your account. The wildcard applies to text sends, including to aliases configured for reading.
+Reading a message or chat history still requires an explicit read permission for that chat.
+Use `telegram-mcp send-to configured` to restore sending only to aliases with send access.
+Both commands accept `--account` (default: `primary`).
+
 </details>
 
 <details>
@@ -194,6 +206,7 @@ Replace the example ID and title with a chat from that account. Ask your client 
 | `send_telegram_message` | Sends text as your personal Telegram account. Use `parse_mode: "html"` for Telegram HTML. |
 
 Use a unique `request_id` for each intended send. Retrying a confirmed send with the same ID and payload returns its recorded receipt. If the outcome is unconfirmed, check the chat before trying a new request. Without an ID, matching payloads for the same account and chat share a receipt.
+For a direct `@username` send, retry with the same username and request ID. If the username has changed owners, the retry stops.
 
 </details>
 

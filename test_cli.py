@@ -57,6 +57,20 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(vscode["telegram-mcp"]["type"], "stdio")
         self.assertFalse(self.root.exists())
 
+    def test_wildcard_is_reversible_and_scoped_to_a_bound_account(self):
+        self.run_cli("setup")
+        self.run_cli("setup", "--account", "work")
+        with self.assertRaisesRegex(SystemExit, "login"):
+            self.run_cli("send-to", "*", "--account", "work")
+        with edit_profiles(self.root) as accounts:
+            accounts["work"]["user_id"] = 42
+        self.run_cli("send-to", "*", "--account", "work")
+        listed = server.list_telegram_chats()["accounts"]
+        self.assertEqual(listed["work"], {"chats": [], "send_to": "*"})
+        self.assertEqual(listed["primary"], {"chats": []})
+        self.run_cli("send-to", "configured", "--account", "work")
+        self.assertEqual(load_profiles(self.root)["work"].send_to, "configured")
+
     def test_public_username_must_resolve_to_the_selected_id(self):
         self.run_cli("setup")
         with edit_profiles(self.root) as accounts:

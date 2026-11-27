@@ -11,7 +11,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import StrictInt
 
-from .profiles import get_account, get_chat, load_profiles
+from .profiles import USERNAME, ChatProfile, get_account, get_chat, is_chat_id, load_profiles
 from .send_journal import SendJournal, operation_keys
 from .tdlib_session import (
     ROOT,
@@ -63,23 +63,25 @@ def cached_chat(client, chat_id, **options):
         return None
 
 
-def load_configured_chat(client, target):
+def load_chat(client, chat_id, *, title, username):
     deadline = time.monotonic() + TD_TIMEOUT
-    if target.username:
+    if username:
         try:
-            public = client.call("searchPublicChat", username=target.username, deadline=deadline)
+            public = client.call("searchPublicChat", username=username, deadline=deadline)
         except RequestError as exc:
             if exc.code not in {400, 404}:
                 raise
         else:
-            if public.get("id") == target.chat_id:
+            if public.get("id") == chat_id:
                 return public
-    else:
-        matches = client.call("searchChatsOnServer", query=target.title, limit=20, deadline=deadline)
-        if target.chat_id in matches.get("chat_ids", []):
-            chat = cached_chat(client, target.chat_id, deadline=deadline)
+    elif title:
+        matches = client.call("searchChatsOnServer", query=title, limit=20, deadline=deadline)
+        if chat_id in matches.get("chat_ids", []):
+            chat = cached_chat(client, chat_id, deadline=deadline)
             if chat is not None:
                 return chat
+    elif chat_id > 0:
+        return client.call("createPrivateChat", user_id=chat_id, force=False, deadline=deadline)
 
     # A configured name can become stale. Recover by ID from the account's chats.
     chat_lists = ["chatListMain", "chatListArchive"]
@@ -93,19 +95,23 @@ def load_configured_chat(client, target):
                 if exc.code != 404:
                     raise
                 chat_lists.remove(list_type)
-            chat = cached_chat(client, target.chat_id, deadline=deadline)
+            chat = cached_chat(client, chat_id, deadline=deadline)
             if chat is not None:
                 return chat
     raise SessionError("The configured chat was not found. Check its ID, title or public username.")
 
 
-def verified_chat(client, target):
-    chat = cached_chat(client, target.chat_id)
+def chat_by_id(client, chat_id, *, title=None, username=None):
+    chat = cached_chat(client, chat_id)
     if chat is None:
-        chat = load_configured_chat(client, target)
-    if chat.get("id") != target.chat_id:
+        chat = load_chat(client, chat_id, title=title, username=username)
+    if chat.get("id") != chat_id:
         raise SessionError("Telegram returned a different chat.")
     return chat
+
+
+def verified_chat(client, target):
+    return chat_by_id(client, target.chat_id, title=target.title, username=target.username)
 
 
 def message_data(message, target):
@@ -137,6 +143,7 @@ def list_telegram_chats() -> dict[str, Any]:
     return {
         "accounts": {
             account: {
+                **({"send_to": "*"} if profile.send_to == "*" else {}),
                 "chats": [
                     {"alias": alias, "title": chat.title, "chat_id": chat.chat_id, "access": chat.access}
                     for alias, chat in profile.chats.items()
@@ -218,6 +225,34 @@ def prepare_text(client, text, parse_mode):
     return formatted
 
 
+def send_recipient(profile, address):
+    target = profile.chats.get(address)
+    if profile.send_to != "*" and (target is None or not target.permits("send")):
+        raise SessionError("This operation is not allowed for the selected chat.")
+    if target is not None:
+        return target
+    if address.startswith("@") and USERNAME.fullmatch(address[1:]):
+        return address
+    if re.fullmatch(r"-?[1-9][0-9]{0,15}", address):
+        chat_id = int(address)
+        if is_chat_id(chat_id):
+            return chat_id
+    raise SessionError("Choose one configured alias, exact @username or numeric Telegram chat ID.")
+
+
+def resolve_send_recipient(client, address):
+    if isinstance(address, ChatProfile):
+        return address
+    if isinstance(address, int):
+        chat = chat_by_id(client, address)
+    else:
+        chat = client.call("searchPublicChat", username=address[1:])
+    chat_id = chat.get("id")
+    if not is_chat_id(chat_id) or not chat.get("title"):
+        raise SessionError("Telegram did not confirm the recipient's ID and title.")
+    return ChatProfile(chat_id, chat["title"], "send")
+
+
 @telegram_tool(SEND)
 def send_telegram_message(
     account: str,
@@ -226,14 +261,21 @@ def send_telegram_message(
     parse_mode: Literal["plain", "html"] = "plain",
     request_id: str | None = None,
 ) -> dict[str, Any]:
-    """Send text as the signed-in user. Use a unique request_id for each intended send and reuse it only to retry that send."""
-    profile, target = get_chat(account, chat, "send", ROOT)
+    """Send only at the user's explicit request to one named recipient.
+
+    Use a configured alias or, with send_to='*', an exact @username or numeric chat ID.
+    Use a unique request_id for each intended send and reuse it only to retry that send.
+    """
+    profile = get_account(account, ROOT)
+    recipient = send_recipient(profile, chat)
     if not text.strip() or parse_mode not in {"plain", "html"}:
         raise SessionError("Provide non-empty text and a parse_mode of plain or html.")
     validate_request_id(request_id)
-    with open_session(account, profile, send_chat_id=target.chat_id) as client:
+    with open_session(account, profile) as client:
+        target = resolve_send_recipient(client, recipient)
+        client.send_chat_id = target.chat_id
         formatted = prepare_text(client, text, parse_mode)
-        return post_message(client, account, target, formatted, request_id)
+        return post_message(client, account, target, formatted, request_id, address=chat)
 
 
 def validate_request_id(request_id):
@@ -250,7 +292,7 @@ def verify_sender(client, target, account_id):
         raise SessionError("The chat is configured to send as a different identity.")
 
 
-def post_message(client, account, target, formatted, request_id):
+def post_message(client, account, target, formatted, request_id, *, address):
     user = client.call("getMe")
     account_id = user.get("id")
     if type(account_id) is not int or account_id <= 0 or user.get("type", {}).get("@type") != "userTypeRegular":
@@ -260,6 +302,8 @@ def post_message(client, account, target, formatted, request_id):
     operation, payload = operation_keys(account_id, target.chat_id, formatted["text"], request_id, entities)
     path = account_directory(account, ROOT) / "send-journal.sqlite3"
     with closing(SendJournal(path)) as journal:
+        if request_id is not None and address.startswith("@"):
+            journal.bind_username(account_id, address, request_id, target.chat_id)
         message_id = journal.receipt(operation, payload)
         if message_id is None:
             verify_sender(client, target, account_id)
